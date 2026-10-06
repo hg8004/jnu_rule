@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<title>학사 규정 챗봇</title>
+<style>
+ :root{--bg:#f6f7f9;--card:#fff;--ink:#1a1d21;--sub:#5b636d;--line:#dfe3e8;--accent:#0b5fff;--warn:#a8431a}
+ *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);
+   font:14px/1.65 -apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+ .wrap{max-width:860px;margin:0 auto;padding:24px 16px 60px}
+ h1{font-size:19px;margin:0 0 4px} .sub{color:var(--sub);margin:0 0 18px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+ label{display:block;font-weight:600;margin-bottom:6px;font-size:13px}
+ input[type=password],input[type=text],textarea{width:100%;padding:9px 11px;border:1px solid var(--line);
+   border-radius:7px;font:inherit;background:#fff}
+ .row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+ .row>div{flex:1;min-width:200px}
+ button{padding:9px 16px;border:0;border-radius:7px;background:var(--accent);color:#fff;
+   font:inherit;font-weight:600;cursor:pointer} button:disabled{background:#aab;cursor:default}
+ .note{color:var(--sub);font-size:12.5px;margin-top:6px}
+ .warn{color:var(--warn);font-weight:600}
+ #log{margin-top:6px}
+ .msg{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px;background:#fff}
+ .msg.q{background:#eef3ff;border-color:#cfdcff}
+ .msg h4{margin:0 0 6px;font-size:13px;color:var(--sub)}
+ .cite{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);font-size:12.5px;color:var(--sub)}
+ pre{white-space:pre-wrap;word-break:break-word;margin:0;font:inherit}
+ .hit{font:12px ui-monospace,Menlo,monospace;color:var(--sub)}
+</style></head><body><div class="wrap">
+
+<h1>학사 규정 챗봇</h1>
+<p class="sub">전남대학교 학사 규정에 답합니다. 실습 P7 · 신소재공학부</p>
+
+<div class="card">
+  <p class="warn">⚠ 전남대학교의 공식 서비스가 아닙니다. 신소재공학부 「인공지능재료공학」 실습 과제로 만든 학생 실습물입니다.</p>
+  <p class="warn">⚠ 이 챗봇의 답으로 학사 판단을 하지 마십시오. 근거 조항을 직접 확인하십시오.</p>
+  <p class="note">실습에서 잰 한계 — 근거가 둘 이상인 질문에서는 필요한 조항 일부가 검색되지 않을 수 있고,
+    규정처럼 보이는 가짜 문서가 색인에 들어가면 그것을 근거로 답할 수 있습니다.</p>
+  <p class="note">규정은 개정됩니다. 배포된 것은 특정 시점의 사본이며, <b>학칙은 들어 있지 않습니다.</b></p>
+</div>
+
+<div class="card">
+  <div class="row">
+    <div>
+      <label for="key">API 키</label>
+      <input id="key" type="password" placeholder="tgpt_sk_...  (이 파일에 저장되지 않습니다)" autocomplete="off">
+      <p class="note">키는 <b>이 페이지를 닫으면 사라집니다.</b> 파일 안에 적지 마십시오 —
+        <code>results/</code> 는 통째로 제출됩니다.</p>
+    </div>
+    <div>
+      <label for="idx">색인 파일 (index_A.json — 웹에서는 자동으로 불러옵니다)</label>
+      <input id="idx" type="file" accept=".json">
+      <p class="note" id="idxinfo">조각과 벡터가 든 파일을 고르십시오.</p>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <label for="q">질문</label>
+  <input id="q" type="text" placeholder="예) 한 계절학기에 몇 학점까지 신청할 수 있습니까?">
+  <div class="row" style="margin-top:10px">
+    <button id="go">묻기</button>
+    <span class="note" id="status"></span>
+  </div>
+</div>
+
+<div id="log"></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+//  전남대학교 학사 규정 챗봇 — 실습 P7
+//  화면과 API 호출은 만들어져 있습니다.
+//  ★ 표시된 자리 두 곳(retrieve · buildMessages)을 채우십시오.
+// ─────────────────────────────────────────────────────────────
+
+const BASE  = "https://hello.timelygpt.co.kr/api/v2/chat/bridge/openai";
+const EMB   = "openai/text-embedding-3-small";
+const CHAT  = "anthropic/claude-opus-4.7";
+
+let INDEX = null;   // { chunks: [{id, 문서, 조항, 판본, 본문}], vectors: [[...], ...] }
+
+function setIndex(data, from) {
+  INDEX = data;
+  document.getElementById("idxinfo").textContent =
+    `${from} · 조각 ${INDEX.chunks.length}개 · 벡터 ${INDEX.vectors.length}개 · ${INDEX.chunks.length === INDEX.vectors.length ? "짝이 맞습니다" : "★ 개수가 다릅니다"}`;
+}
+
+document.getElementById("idx").addEventListener("change", async e => {
+  const f = e.target.files[0]; if (!f) return;
+  setIndex(JSON.parse(await f.text()), "직접 고른 파일");
+});
+
+// 웹 서버에 올렸을 때만 옆의 index_A.json 을 자동으로 읽는다. file:// 에서는 fetch 가 실패하므로 파일 선택 칸을 쓴다.
+if (location.protocol.startsWith("http")) {
+  document.getElementById("idxinfo").textContent = "색인을 불러오는 중…";
+  fetch("index_A.json")
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(d => setIndex(d, "자동으로 불러옴"))
+    .catch(err => {
+      document.getElementById("idxinfo").textContent =
+        `색인을 자동으로 불러오지 못했습니다 (${err.message}). 파일을 직접 고르십시오.`;
+    });
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+async function api(path, body) {
+  const key = document.getElementById("key").value.trim();
+  if (!key) throw new Error("API 키를 입력하십시오.");
+  const r = await fetch(BASE + path, {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const j = await r.json();
+  if (!r.ok || j.error) throw new Error(JSON.stringify(j.error || j).slice(0, 200));
+  return j;
+}
+
+async function embed(text) {
+  const j = await api("/embeddings", { model: EMB, input: text });
+  return j.data[0].embedding;
+}
+
+function cos(a, b) {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { d += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  return d / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ★ 채울 자리 ① — 질문 벡터와 색인을 받아 상위 k개 조각을 고릅니다.
+//   반환: [{chunk, score}, ...]  (점수 높은 순)
+//   힌트: cos(qvec, INDEX.vectors[i]) 를 모든 i 에 대해 재고 정렬합니다.
+//   k 를 몇으로 할지는 여러분의 판단입니다. 정한 값과 이유를 보고서에 적으십시오.
+// ═══════════════════════════════════════════════════════════════
+function retrieve(qvec, k) {
+  return INDEX.vectors
+    .map((v, i) => ({ chunk: INDEX.chunks[i], score: cos(qvec, v) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ★ 채울 자리 ② — 검색된 조각으로 모델에게 보낼 메시지를 만듭니다.
+//   시스템 프롬프트에 아래 세 가지를 반드시 넣으십시오.
+//     · 답의 근거가 된 문서명 · 조항 · 판본을 함께 밝힐 것
+//     · 서로 다른 답이 나올 수 있으면 전부 제시하고, 어느 조건에서 어느 것이
+//       적용되는지 밝힐 것
+//     · 주어진 문맥으로 확인할 수 없으면 「확인할 수 없다」고 답할 것. 추측하지 말 것
+// ═══════════════════════════════════════════════════════════════
+const SYSTEM_RULES =
+`너는 전남대학교 학사 규정에 대해 답하는 도우미다. 아래 [문맥]에 주어진 규정 조각만을 근거로 답한다.
+
+반드시 지킬 것:
+1. 답의 근거가 된 조각의 문서명·조항·판본을 함께 밝힌다. 예) (전남대학교 교학규정 제50조, 판본: 전남대학교학교규정 제2225호, 2026. 7. 1., 일부개정.)
+2. 서로 다른 답이 나올 수 있으면 전부 제시하고, 어느 조건에서 어느 것이 적용되는지 밝힌다. 하나만 골라 단정하지 않는다.
+3. 주어진 문맥으로 확인할 수 없으면 「확인할 수 없다」고 답한다. 추측하지 않는다. 문맥에 없는 내용을 일반 지식으로 메우지 않는다.`;
+
+function formatContext(hits) {
+  return hits.map((h, i) =>
+    `[조각 ${i + 1}] 문서: ${h.chunk.문서} | 조항: ${h.chunk.조항} | 판본: ${h.chunk.판본}\n${h.chunk.본문.trim()}`
+  ).join("\n\n---\n\n");
+}
+
+function buildMessages(question, hits) {
+  return [
+    { role: "system", content: SYSTEM_RULES + "\n\n[문맥]\n" + formatContext(hits) },
+    { role: "user", content: question }
+  ];
+}
+
+// ───────────────────────────────────────────── 아래는 고치지 않아도 됩니다
+// ★ 몇 개를 가져올지(k)는 여러분이 정합니다. 정한 값과 근거를 보고서에 적으십시오.
+const K = 5;   // 답안지 16문항 실측: 근거 24개 중 21개가 1~3위, 나머지는 #11·#15·#16 — k=3~10 은 결과가 같다
+
+async function ask() {
+  const q = document.getElementById("q").value.trim();
+  const st = document.getElementById("status");
+  if (!q) return;
+  if (!INDEX) { st.textContent = "색인 파일을 먼저 고르십시오."; return; }
+  document.getElementById("go").disabled = true;
+  st.textContent = "질문을 벡터로 바꾸는 중…";
+  const log = document.getElementById("log");
+  const box = document.createElement("div");
+  box.innerHTML = `<div class="msg q"><h4>질문</h4><pre></pre></div>`;
+  box.querySelector("pre").textContent = q;
+  log.prepend(box);
+  try {
+    const qv = await embed(q);
+    st.textContent = "규정을 검색하는 중…";
+    const hits = retrieve(qv, K);
+    st.textContent = "답을 만드는 중…";
+    const j = await api("/chat/completions",
+      { model: CHAT, messages: buildMessages(q, hits), max_tokens: 1200 });
+    const ans = j.choices[0].message.content;
+    const a = document.createElement("div");
+    a.className = "msg";
+    a.innerHTML = `<h4>답</h4><pre></pre>
+      <div class="cite"><b>검색된 조각 ${hits.length}개</b><br>` +
+      hits.map(h => `<details><summary class="hit">${h.score.toFixed(3)}  ${esc(h.chunk.문서 || "")} ${esc(h.chunk.조항 || h.chunk.id)}</summary><pre style="font-size:12px;color:#333">${esc((h.chunk.본문 || "").slice(0, 1200))}</pre></details>`).join("") +
+      `<br><br>토큰 입력 ${j.usage.prompt_tokens} · 출력 ${j.usage.completion_tokens}</div>`;
+    a.querySelector("pre").textContent = ans;
+    box.after(a);
+    st.textContent = "";
+  } catch (e) {
+    const a = document.createElement("div");
+    a.className = "msg";
+    a.innerHTML = `<h4>오류</h4><pre></pre>`;
+    a.querySelector("pre").textContent = e.message;
+    box.after(a);
+    st.textContent = "";
+  }
+  document.getElementById("go").disabled = false;
+}
+
+document.getElementById("go").addEventListener("click", ask);
+document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") ask(); });
+</script>
+</div></body></html>
